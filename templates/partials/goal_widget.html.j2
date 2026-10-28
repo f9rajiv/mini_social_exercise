@@ -1,0 +1,51 @@
+{#
+  Weekly goal widget - Chapter 2, Design Claim 13 (specific, challenging goals)
+  and Design Claim 15 (frequent feedback on progress toward the goal).
+  Expects: goal_progress (dict or None), suggested_goal (dict or None).
+#}
+<div class="card shadow-sm border-primary">
+  <div class="card-body">
+    {% if goal_progress %}
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="card-title mb-0">Your weekly goal</h5>
+        <small class="text-muted">{{ goal_progress.days_left }} day{{ 's' if goal_progress.days_left != 1 }} left</small>
+      </div>
+
+      <div class="progress mb-2" style="height: 20px;" role="progressbar"
+           aria-valuenow="{{ goal_progress.percent }}" aria-valuemin="0" aria-valuemax="100">
+        <div class="progress-bar {% if goal_progress.completed %}bg-success{% endif %}"
+             style="width: {{ goal_progress.percent }}%">{{ goal_progress.percent }}%</div>
+      </div>
+
+      <div class="d-flex justify-content-between">
+        <span>Posts: <strong>{{ goal_progress.posts_done }}</strong> / {{ goal_progress.posts_target }}</span>
+        <span>Comments: <strong>{{ goal_progress.comments_done }}</strong> / {{ goal_progress.comments_target }}</span>
+        <a href="{{ url_for('goals') }}" class="small">Details</a>
+      </div>
+
+      {% if goal_progress.completed %}
+        <p class="text-success mb-0 mt-2">Goal reached for this week. Well done!</p>
+      {% else %}
+        <p class="text-muted small mb-0 mt-2">
+          {{ goal_progress.remaining }} more to go.
+          <a href="{{ url_for('needs_reply') }}">Find posts that need a reply</a>
+        </p>
+      {% endif %}
+
+    {% elif suggested_goal %}
+      <h5 class="card-title">Set a weekly goal</h5>
+      <p class="mb-2">
+        Based on your best week so far, we suggest
+        <strong>{{ suggested_goal.posts_target }} posts</strong> and
+        <strong>{{ suggested_goal.comments_target }} comments</strong> this week.
+      </p>
+      <form action="{{ url_for('goals') }}" method="POST" class="d-inline">
+        <input type="hidden" name="posts_target" value="{{ suggested_goal.posts_target }}">
+        <input type="hidden" name="comments_target" value="{{ suggested_goal.comments_target }}">
+        <input type="hidden" name="next" value="{{ url_for('feed') }}">
+        <button type="submit" class="btn btn-primary btn-sm">Accept this goal</button>
+      </form>
+      <a href="{{ url_for('goals') }}" class="btn btn-light btn-sm">Choose my own</a>
+    {% endif %}
+  </div>
+</div>

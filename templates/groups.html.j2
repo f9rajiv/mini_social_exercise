@@ -1,0 +1,51 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{# Interest groups index - Chapter 3, Design Claim 6: named groups within the community #}
+
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-4"><span>Groups</span></h2>
+
+  {% if session.get('user_id') %}
+  <!-- Create a new named group -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">Create a group</h5>
+      <form action="{{ url_for('create_group') }}" method="POST">
+        <div class="mb-2">
+          <input type="text" class="form-control" name="name" placeholder="Group name, e.g. DIY Builders"
+                 minlength="3" maxlength="40" required>
+        </div>
+        <div class="mb-2">
+          <textarea class="form-control" name="description" rows="2" maxlength="300"
+                    placeholder="What is this group about?"></textarea>
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm float-end">Create</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
+  {% for group in groups %}
+  <div class="card mb-3 shadow-sm card-hover">
+    <div class="card-body d-flex justify-content-between align-items-center">
+      <div>
+        <h5 class="mb-1">
+          <a href="{{ url_for('group_detail', group_id=group.id) }}" class="text-decoration-none">{{ group.name }}</a>
+          {% if group.is_member %}<span class="badge text-bg-success ms-1">Member</span>{% endif %}
+        </h5>
+        <p class="mb-1 text-muted">{{ group.description or "No description." }}</p>
+        <small class="text-muted">{{ group.member_count }} member{{ 's' if group.member_count != 1 }} &middot;
+          {{ group.post_count }} post{{ 's' if group.post_count != 1 }}</small>
+      </div>
+      {% if session.get('user_id') and not group.is_member %}
+      <form action="{{ url_for('join_group', group_id=group.id) }}" method="POST">
+        <button type="submit" class="btn btn-outline-primary btn-sm">Join</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="text-center text-muted">No groups yet. Be the first to create one!</p>
+  {% endfor %}
+</div>
+{% endblock %}

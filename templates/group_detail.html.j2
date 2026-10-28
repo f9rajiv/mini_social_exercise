@@ -1,0 +1,75 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+{# Group page - Chapter 3, Design Claim 6: a named subgroup with its own members and feed #}
+
+<div class="col-md-8 mx-auto">
+  <!-- Group header: name, description, membership -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <h2 class="card-title mb-1">{{ group.name }}</h2>
+          <p class="mb-1">{{ group.description or "No description." }}</p>
+          <small class="text-muted">Created by @{{ group.creator_name }} on {{ group.created_at|datetimeformat }}
+            &middot; {{ members|length }} member{{ 's' if members|length != 1 }}</small>
+        </div>
+        {% if session.get('user_id') %}
+          {% if is_member %}
+          <form action="{{ url_for('leave_group', group_id=group.id) }}" method="POST"
+                onsubmit="return confirm('Leave {{ group.name }}?');">
+            <button type="submit" class="btn btn-outline-secondary btn-sm">Leave group</button>
+          </form>
+          {% else %}
+          <form action="{{ url_for('join_group', group_id=group.id) }}" method="POST">
+            <button type="submit" class="btn btn-primary btn-sm">Join group</button>
+          </form>
+          {% endif %}
+        {% endif %}
+      </div>
+
+      <!-- Members are shown so people can see who they share the group with -->
+      <div class="mt-3">
+        {% for member in members[:30] %}
+          <span class="me-2">{{ user_display(member.username) }}</span>
+        {% endfor %}
+        {% if members|length > 30 %}<span class="text-muted">and {{ members|length - 30 }} more</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Only members can post inside the group -->
+  {% if is_member %}
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <form action="{{ url_for('add_post') }}" method="POST">
+        <input type="hidden" name="group_id" value="{{ group.id }}">
+        <textarea class="form-control mb-2" name="content" rows="2"
+                  placeholder="Share something with {{ group.name }}..." required></textarea>
+        <button type="submit" class="btn btn-primary btn-sm float-end">Post to group</button>
+      </form>
+    </div>
+  </div>
+  {% elif session.get('user_id') %}
+  <p class="text-center text-muted">Join the group to post here.</p>
+  {% endif %}
+
+  <h4 class="border-bottom pb-2 mb-3">Group posts</h4>
+  {% for post in posts %}
+  <div class="card mb-3 shadow-sm">
+    <div class="card-body">
+      <div class="d-flex justify-content-between">
+        <strong>{{ user_display(post.username) }}</strong>
+        <small class="text-muted">{{ post.created_at|datetimeformat }}</small>
+      </div>
+      <p class="mt-2 mb-1">{{ post.content }}</p>
+      <a href="{{ url_for('post_detail', post_id=post.id) }}" class="small">
+        {{ post.comment_count }} comment{{ 's' if post.comment_count != 1 }} &middot; Open post
+      </a>
+    </div>
+  </div>
+  {% else %}
+  <p class="text-center text-muted">No posts in this group yet.</p>
+  {% endfor %}
+</div>
+{% endblock %}

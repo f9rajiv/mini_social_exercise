@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -6,7 +6,7 @@ import json
 import sqlite3
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -78,6 +78,46 @@ def query_db(query, args=(), one=False, commit=False):
         print(f"Database error: {e}")
         return None
 
+
+def init_assignment1_tables():
+    """
+    Creates the database tables needed by the Coding Assignment #1 features.
+    Safe to run on every start: tables are only created if they are missing.
+    """
+    db = sqlite3.connect(DATABASE)
+    db.executescript("""
+        -- Chapter 2, Design Claim 13: one weekly contribution goal per user
+        CREATE TABLE IF NOT EXISTS contribution_goals (
+            user_id         INTEGER PRIMARY KEY,
+            posts_target    INTEGER NOT NULL,
+            comments_target INTEGER NOT NULL,
+            set_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+        );
+
+        -- Chapter 3, Design Claim 6: named interest groups that users create and join
+        CREATE TABLE IF NOT EXISTS interest_groups (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            description TEXT,
+            creator_id  INTEGER NOT NULL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS group_members (
+            group_id  INTEGER NOT NULL,
+            user_id   INTEGER NOT NULL,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            PRIMARY KEY (group_id, user_id)
+        );
+    """)
+    # Posts can optionally belong to a group. Existing posts keep group_id = NULL.
+    post_columns = [row[1] for row in db.execute('PRAGMA table_info(posts)')]
+    if 'group_id' not in post_columns:
+        db.execute('ALTER TABLE posts ADD COLUMN group_id INTEGER')
+    db.commit()
+    db.close()
+
+init_assignment1_tables()
+
 @app.template_filter('datetimeformat')
 def datetimeformat(value):
     if isinstance(value, datetime):
@@ -124,9 +164,11 @@ def feed():
     if sort == 'popular':
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
-                   IFNULL(r.total_reactions, 0) as total_reactions
+                   IFNULL(r.total_reactions, 0) as total_reactions,
+                   ig.id as group_id, ig.name as group_name
             FROM posts p
             JOIN users u ON p.user_id = u.id
+            LEFT JOIN interest_groups ig ON p.group_id = ig.id
             LEFT JOIN (
                 SELECT post_id, COUNT(*) as total_reactions FROM reactions GROUP BY post_id
             ) r ON p.id = r.post_id
@@ -140,9 +182,11 @@ def feed():
         posts = recommend(current_user_id, show == 'following' and current_user_id)
     else:  # Default sort is 'new'
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+                   ig.id as group_id, ig.name as group_name
             FROM posts p
             JOIN users u ON p.user_id = u.id
+            LEFT JOIN interest_groups ig ON p.group_id = ig.id
             {where_clause}
             ORDER BY p.created_at DESC
             LIMIT ? OFFSET ?
@@ -191,15 +235,22 @@ def feed():
             'comments': comments_moderated
         })
 
-    #  4. Render Template with Pagination Info 
-    return render_template('feed.html.j2', 
-                           posts=posts_data, 
+    #  3. Weekly goal widget (Chapter 2, Design Claims 13 & 15)
+    # Logged-in users see their progress, or a suggested goal if they have none yet.
+    goal_progress = get_goal_progress(current_user_id) if current_user_id else None
+    suggested_goal = suggest_goal(current_user_id) if current_user_id and not goal_progress else None
+
+    #  4. Render Template with Pagination Info
+    return render_template('feed.html.j2',
+                           posts=posts_data,
                            current_sort=sort,
                            current_show=show,
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           goal_progress=goal_progress,
+                           suggested_goal=suggested_goal)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -214,21 +265,31 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
+    # Optional: the post is made inside an interest group (Chapter 3, Design Claim 6).
+    # Only members of the group are allowed to post there.
+    group_id = request.form.get('group_id', type=int)
+    if group_id and not is_group_member(group_id, user_id):
+        flash('You need to join this group before posting in it.', 'warning')
+        return redirect(url_for('group_detail', group_id=group_id))
+
     # Pass the user's content through the moderation function
     moderated_content = content
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
         db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+        db.execute('INSERT INTO posts (user_id, content, group_id) VALUES (?, ?, ?)',
+                   (user_id, moderated_content, group_id))
         db.commit()
         flash('Your post was successfully created!', 'success')
+        flash_goal_feedback(user_id)
     else:
         # This will catch empty posts or posts that were fully censored
         flash('Post cannot be empty or was fully censored.', 'warning')
 
-    # Redirect back to the main feed to see the new post
+    # Group posts return to the group page, other posts to the main feed
+    if group_id:
+        return redirect(url_for('group_detail', group_id=group_id))
     return redirect(url_for('feed'))
     
     
@@ -314,13 +375,21 @@ def user_profile(username):
             is_currently_following = True
     # --
 
-    return render_template('user_profile.html.j2', 
-                           user=user, 
-                           posts=posts, 
+    # Groups the user belongs to (Chapter 3, Design Claim 6)
+    user_groups = query_db('''
+        SELECT ig.id, ig.name FROM interest_groups ig
+        JOIN group_members gm ON gm.group_id = ig.id
+        WHERE gm.user_id = ? ORDER BY ig.name
+    ''', (user['id'],))
+
+    return render_template('user_profile.html.j2',
+                           user=user,
+                           posts=posts,
                            comments=comments,
-                           followers_count=followers_count, 
+                           followers_count=followers_count,
                            following_count=following_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           user_groups=user_groups)
     
 
 @app.route('/u/<username>/followers')
@@ -499,6 +568,7 @@ def add_comment(post_id):
                    (post_id, user_id, content))
         db.commit()
         flash('Your comment was added.', 'success')
+        flash_goal_feedback(user_id)
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -864,6 +934,344 @@ def loop_color(user_id):
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
     return f'rgb({r % 128 + 80}, {g % 128 + 80}, {b % 128 + 80})'
+
+
+# ===================================================================
+# Coding Assignment #1: Contribution and Commitment
+#
+# Feature 1 - Weekly contribution goals     -> Chapter 2, Design Claim 13
+#             (with progress feedback, which also follows Chapter 2, Design Claim 15)
+# Feature 2 - "Needs a reply" list          -> Chapter 2, Design Claim 1
+# Feature 3 - Interest groups               -> Chapter 3, Design Claim 6
+# ===================================================================
+
+# ----- Feature 1: Weekly contribution goals (Chapter 2, Design Claim 13) -----
+# "Providing members with specific and highly challenging goals, whether self-set
+# or system-suggested, increases contribution."
+# A goal is a specific number of posts and comments to write in the current week.
+# The system suggests a challenging target from the user's own history, the user can
+# accept or change it, and progress is fed back on the feed and after every contribution.
+
+GOAL_LIMITS = {'posts': (1, 50), 'comments': (1, 100)}
+
+def current_week_start():
+    """Returns Monday 00:00 (UTC) of the current week. Timestamps in the DB are UTC."""
+    today = datetime.utcnow().date()
+    monday = today - timedelta(days=today.weekday())
+    return datetime(monday.year, monday.month, monday.day)
+
+
+def count_contributions(user_id, start, end):
+    """Counts the posts and comments a user wrote between two datetimes."""
+    start_s = start.strftime('%Y-%m-%d %H:%M:%S')
+    end_s = end.strftime('%Y-%m-%d %H:%M:%S')
+    posts = query_db('SELECT COUNT(*) AS cnt FROM posts WHERE user_id = ? AND created_at >= ? AND created_at < ?',
+                     (user_id, start_s, end_s), one=True)['cnt']
+    comments = query_db('SELECT COUNT(*) AS cnt FROM comments WHERE user_id = ? AND created_at >= ? AND created_at < ?',
+                        (user_id, start_s, end_s), one=True)['cnt']
+    return posts, comments
+
+
+def suggest_goal(user_id):
+    """
+    Suggests a goal that is challenging but still realistic: one more than the user's
+    best week so far, clamped to a sensible range. Very hard goals would be demotivating
+    (Locke & Latham, discussed in Chapter 2 next to Design Claim 13).
+    """
+    def best_week(table):
+        row = query_db(f"""
+            SELECT MAX(cnt) AS best FROM (
+                SELECT COUNT(*) AS cnt FROM {table} WHERE user_id = ?
+                GROUP BY strftime('%Y-%W', created_at)
+            )""", (user_id,), one=True)
+        return row['best'] or 0
+
+    posts_target = min(max(best_week('posts') + 1, 2), 10)
+    comments_target = min(max(best_week('comments') + 1, 5), 30)
+    return {'posts_target': posts_target, 'comments_target': comments_target}
+
+
+def get_goal_progress(user_id):
+    """Returns the user's goal and this week's progress, or None if no goal is set."""
+    goal = query_db('SELECT posts_target, comments_target FROM contribution_goals WHERE user_id = ?',
+                    (user_id,), one=True)
+    if not goal:
+        return None
+
+    week_start = current_week_start()
+    posts_done, comments_done = count_contributions(user_id, week_start, week_start + timedelta(days=7))
+
+    # Overall progress only counts contributions up to each target,
+    # so extra posts cannot hide missing comments.
+    total_target = goal['posts_target'] + goal['comments_target']
+    total_done = min(posts_done, goal['posts_target']) + min(comments_done, goal['comments_target'])
+
+    return {
+        'posts_target': goal['posts_target'],
+        'comments_target': goal['comments_target'],
+        'posts_done': posts_done,
+        'comments_done': comments_done,
+        'percent': int(100 * total_done / total_target),
+        'remaining': total_target - total_done,
+        'completed': total_done >= total_target,
+        'days_left': 7 - datetime.utcnow().weekday(),  # includes today
+    }
+
+
+def flash_goal_feedback(user_id):
+    """
+    Chapter 2, Design Claim 15: goals work better with frequent feedback.
+    Called right after a post or comment so the user immediately sees their progress.
+    """
+    progress = get_goal_progress(user_id)
+    if not progress:
+        return
+    if progress['completed']:
+        flash('Weekly goal reached! You met your goal of '
+              f"{progress['posts_target']} posts and {progress['comments_target']} comments.", 'success')
+    else:
+        flash(f"Weekly goal: {progress['posts_done']}/{progress['posts_target']} posts, "
+              f"{progress['comments_done']}/{progress['comments_target']} comments "
+              f"({progress['percent']}%). {progress['remaining']} to go!", 'info')
+
+
+@app.route('/goals', methods=['GET', 'POST'])
+def goals():
+    """Shows the user's weekly goal and history, and lets them set or change the goal."""
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to set a goal.', 'danger')
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        posts_target = request.form.get('posts_target', type=int)
+        comments_target = request.form.get('comments_target', type=int)
+
+        # Validate that both targets are whole numbers within the allowed range
+        p_min, p_max = GOAL_LIMITS['posts']
+        c_min, c_max = GOAL_LIMITS['comments']
+        if posts_target is None or comments_target is None \
+                or not p_min <= posts_target <= p_max or not c_min <= comments_target <= c_max:
+            flash(f'Goals must be {p_min}-{p_max} posts and {c_min}-{c_max} comments.', 'warning')
+            return redirect(url_for('goals'))
+
+        # One goal per user: replace any previous goal
+        query_db('INSERT OR REPLACE INTO contribution_goals (user_id, posts_target, comments_target) VALUES (?, ?, ?)',
+                 (user_id, posts_target, comments_target), commit=True)
+        flash(f'Goal set: {posts_target} posts and {comments_target} comments this week.', 'success')
+        return redirect(request.form.get('next') or url_for('goals'))
+
+    progress = get_goal_progress(user_id)
+
+    # History of the last 6 weeks, compared against the current goal
+    history = []
+    if progress:
+        week_start = current_week_start()
+        for weeks_ago in range(1, 7):
+            start = week_start - timedelta(weeks=weeks_ago)
+            posts_done, comments_done = count_contributions(user_id, start, start + timedelta(days=7))
+            history.append({
+                'week_start': start,
+                'posts_done': posts_done,
+                'comments_done': comments_done,
+                'met': posts_done >= progress['posts_target'] and comments_done >= progress['comments_target'],
+            })
+
+    return render_template('goals.html.j2',
+                           progress=progress,
+                           suggested_goal=suggest_goal(user_id),
+                           history=history,
+                           limits=GOAL_LIMITS)
+
+
+@app.route('/goals/delete', methods=['POST'])
+def delete_goal():
+    """Removes the user's weekly goal."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    query_db('DELETE FROM contribution_goals WHERE user_id = ?', (user_id,), commit=True)
+    flash('Your weekly goal was removed.', 'info')
+    return redirect(url_for('goals'))
+
+
+# ----- Feature 2: "Needs a reply" list (Chapter 2, Design Claim 1) -----
+# "Making the list of needed contributions easily visible increases the likelihood
+# that the community will provide them."
+# A needed contribution is defined as a reply to a post by someone you follow that has
+# received few or no comments, and that you have not replied to yet. Posts with the
+# fewest replies are listed first, and the count is always visible in the navigation bar.
+
+NEEDS_REPLY_MAX_COMMENTS = 2   # posts with fewer comments than this "need a reply"
+NEEDS_REPLY_PAGE_SIZE = 20
+
+NEEDS_REPLY_WHERE = """
+    WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = :uid)
+      AND NOT EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id = :uid)
+      AND (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) < :max_comments
+"""
+
+def count_needs_reply(user_id):
+    """Number of posts currently waiting for this user's reply (shown in the navbar)."""
+    row = query_db(f'SELECT COUNT(*) AS cnt FROM posts p {NEEDS_REPLY_WHERE}',
+                   {'uid': user_id, 'max_comments': NEEDS_REPLY_MAX_COMMENTS}, one=True)
+    return row['cnt'] if row else 0
+
+
+@app.context_processor
+def inject_needs_reply_count():
+    """Makes the needs-reply count available in every template (used by the navbar badge)."""
+    user_id = session.get('user_id')
+    return {'needs_reply_count': count_needs_reply(user_id) if user_id else 0}
+
+
+@app.route('/needs-reply')
+def needs_reply():
+    """Lists followed users' posts that still need a reply, fewest replies first."""
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to see posts that need a reply.', 'danger')
+        return redirect(url_for('login'))
+
+    posts_raw = query_db(f"""
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+               (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comment_count
+        FROM posts p JOIN users u ON p.user_id = u.id
+        {NEEDS_REPLY_WHERE}
+        ORDER BY comment_count ASC, p.created_at DESC
+        LIMIT :limit
+    """, {'uid': user_id, 'max_comments': NEEDS_REPLY_MAX_COMMENTS, 'limit': NEEDS_REPLY_PAGE_SIZE})
+
+    posts = []
+    for post_raw in posts_raw:
+        post = dict(post_raw)
+        post['content'], _ = moderate_content(post['content'])
+        posts.append(post)
+
+    following_count = query_db('SELECT COUNT(*) AS cnt FROM follows WHERE follower_id = ?',
+                               (user_id,), one=True)['cnt']
+
+    return render_template('needs_reply.html.j2',
+                           posts=posts,
+                           total=count_needs_reply(user_id),
+                           following_count=following_count,
+                           goal_progress=get_goal_progress(user_id))
+
+
+# ----- Feature 3: Interest groups (Chapter 3, Design Claim 6) -----
+# "Creating named groups within a larger online community increases members'
+# commitment to the subgroups."
+# Users can create a named group with a description, join or leave groups, and post
+# inside a group. Group posts are labelled with the group name on the main feed,
+# and a user's groups are listed on their profile.
+
+def is_group_member(group_id, user_id):
+    return query_db('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+                    (group_id, user_id), one=True) is not None
+
+
+@app.route('/groups')
+def groups_index():
+    """Lists all groups with member and post counts. Groups the user joined are listed first."""
+    user_id = session.get('user_id')
+    groups = query_db('''
+        SELECT ig.id, ig.name, ig.description, ig.created_at,
+               (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = ig.id) AS member_count,
+               (SELECT COUNT(*) FROM posts p WHERE p.group_id = ig.id) AS post_count,
+               EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_id = ig.id AND gm.user_id = ?) AS is_member
+        FROM interest_groups ig
+        ORDER BY is_member DESC, member_count DESC, ig.name
+    ''', (user_id or 0,))
+    return render_template('groups.html.j2', groups=groups)
+
+
+@app.route('/groups/new', methods=['POST'])
+def create_group():
+    """Creates a new named group. The creator automatically becomes its first member."""
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to create a group.', 'danger')
+        return redirect(url_for('login'))
+
+    name = (request.form.get('name') or '').strip()
+    description = (request.form.get('description') or '').strip()
+
+    if not 3 <= len(name) <= 40:
+        flash('Group name must be 3-40 characters long.', 'warning')
+        return redirect(url_for('groups_index'))
+    if query_db('SELECT 1 FROM interest_groups WHERE name = ?', (name,), one=True):
+        flash('A group with that name already exists. Join it instead!', 'warning')
+        return redirect(url_for('groups_index'))
+
+    cur = query_db('INSERT INTO interest_groups (name, description, creator_id) VALUES (?, ?, ?)',
+                   (name, description[:300], user_id), commit=True)
+    group_id = cur.lastrowid
+    query_db('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)', (group_id, user_id), commit=True)
+
+    flash(f'Group "{name}" created. Invite others by sharing its page!', 'success')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+@app.route('/groups/<int:group_id>')
+def group_detail(group_id):
+    """Group page: name, description, members, join/leave button and the group's own feed."""
+    group = query_db('''
+        SELECT ig.*, u.username AS creator_name FROM interest_groups ig
+        JOIN users u ON ig.creator_id = u.id WHERE ig.id = ?
+    ''', (group_id,), one=True)
+    if not group:
+        abort(404)
+
+    user_id = session.get('user_id')
+    members = query_db('''
+        SELECT u.id, u.username FROM group_members gm JOIN users u ON gm.user_id = u.id
+        WHERE gm.group_id = ? ORDER BY gm.joined_at
+    ''', (group_id,))
+
+    posts_raw = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+               (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comment_count
+        FROM posts p JOIN users u ON p.user_id = u.id
+        WHERE p.group_id = ? ORDER BY p.created_at DESC LIMIT 50
+    ''', (group_id,))
+    posts = []
+    for post_raw in posts_raw:
+        post = dict(post_raw)
+        post['content'], _ = moderate_content(post['content'])
+        posts.append(post)
+
+    return render_template('group_detail.html.j2',
+                           group=group,
+                           members=members,
+                           posts=posts,
+                           is_member=bool(user_id) and is_group_member(group_id, user_id))
+
+
+@app.route('/groups/<int:group_id>/join', methods=['POST'])
+def join_group(group_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to join a group.', 'danger')
+        return redirect(url_for('login'))
+    group = query_db('SELECT name FROM interest_groups WHERE id = ?', (group_id,), one=True)
+    if not group:
+        abort(404)
+    # INSERT OR IGNORE: joining twice has no effect
+    query_db('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)',
+             (group_id, user_id), commit=True)
+    flash(f'Welcome to {group["name"]}!', 'success')
+    return redirect(url_for('group_detail', group_id=group_id))
+
+
+@app.route('/groups/<int:group_id>/leave', methods=['POST'])
+def leave_group(group_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    query_db('DELETE FROM group_members WHERE group_id = ? AND user_id = ?',
+             (group_id, user_id), commit=True)
+    flash('You left the group.', 'info')
+    return redirect(url_for('group_detail', group_id=group_id))
 
 
 # ----- Functions to be implemented are below

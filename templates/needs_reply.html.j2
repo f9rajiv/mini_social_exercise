@@ -1,0 +1,66 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+{#
+  "Needs a reply" - Chapter 2, Design Claim 1:
+  making the list of needed contributions easily visible.
+  Posts by people you follow with few/no replies that you have not replied to yet.
+#}
+
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-3"><span>Needs a reply</span></h2>
+
+  <p class="text-center text-muted">
+    {% if total %}
+      <strong>{{ total }}</strong> post{{ 's' if total != 1 }} from people you follow
+      {{ 'have' if total != 1 else 'has' }} fewer than 2 replies. Posts with no replies are shown first.
+      Once you reply, the post leaves your list.
+    {% endif %}
+  </p>
+
+  {% if goal_progress and not goal_progress.completed %}
+  <div class="alert alert-info text-center py-2">
+    Each reply counts toward your weekly goal:
+    {{ goal_progress.comments_done }} / {{ goal_progress.comments_target }} comments so far.
+  </div>
+  {% endif %}
+
+  {% for post in posts %}
+  <div class="card mb-3 shadow-sm" id="needs-reply-{{ post.id }}">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <strong>{{ user_display(post.username) }}</strong>
+        <div>
+          {% if post.comment_count == 0 %}
+            <span class="badge text-bg-danger">No replies yet</span>
+          {% else %}
+            <span class="badge text-bg-warning">{{ post.comment_count }} repl{{ 'y' if post.comment_count == 1 else 'ies' }}</span>
+          {% endif %}
+          <small class="text-muted ms-2">{{ post.created_at|datetimeformat }}</small>
+        </div>
+      </div>
+
+      <p class="mt-2">{{ post.content }}</p>
+
+      <!-- Reply directly from the list; uses the existing comment route -->
+      <form action="{{ url_for('add_comment', post_id=post.id) }}" method="POST" class="d-flex gap-2">
+        <input type="text" name="content" class="form-control form-control-sm"
+               placeholder="Write a reply to @{{ post.username }}..." required>
+        <button type="submit" class="btn btn-primary btn-sm">Reply</button>
+      </form>
+      <a href="{{ url_for('post_detail', post_id=post.id) }}" class="small">Open post</a>
+    </div>
+  </div>
+  {% else %}
+  <div class="card shadow-sm">
+    <div class="card-body text-center">
+      {% if following_count == 0 %}
+        <p class="mb-0">You are not following anyone yet. Follow people to see posts that need your reply.</p>
+      {% else %}
+        <p class="mb-0">All caught up! Every post from people you follow has replies.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

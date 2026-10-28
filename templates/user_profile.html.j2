@@ -32,6 +32,16 @@
             </div>
           {% endif %}
 
+          <!-- Groups this user belongs to (Chapter 3, Design Claim 6) -->
+          {% if user_groups %}
+          <div class="mt-3">
+            <strong>Groups:</strong>
+            {% for grp in user_groups %}
+              <a href="{{ url_for('group_detail', group_id=grp.id) }}" class="badge text-bg-info text-decoration-none">{{ grp.name }}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+
           <div class="mt-4 d-flex">
             <div class="me-4">
               <a href="/u/{{ user.username }}/followers" class="text-decoration-none text-dark">

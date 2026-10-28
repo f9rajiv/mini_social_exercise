@@ -7,6 +7,11 @@
 </div>
 
 {% if session.get('user_id') %}
+<!-- Weekly goal widget (Chapter 2, Design Claims 13 & 15) -->
+<div class="col-md-8 mx-auto mb-4">
+  {% include "partials/goal_widget.html.j2" %}
+</div>
+
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
@@ -76,6 +81,10 @@
         {% endif %}
       </div>
       
+      {% if entry.post.group_name %}
+      <!-- Post was made inside an interest group (Chapter 3, Design Claim 6) -->
+      <a href="{{ url_for('group_detail', group_id=entry.post.group_id) }}" class="badge text-bg-info text-decoration-none mt-2">in {{ entry.post.group_name }}</a>
+      {% endif %}
       <p class="mt-2">{{ entry.post.content }}</p>
 
       <!-- Reactions Display and Add Reaction Button -->

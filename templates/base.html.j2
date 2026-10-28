@@ -37,6 +37,22 @@
         <li class="nav-item">
           <a href="/" class="nav-link">Home</a>
         </li>
+        <!-- Coding Assignment #1 features -->
+        <li class="nav-item">
+          <a class="nav-link" href="{{ url_for('groups_index') }}">Groups</a>
+        </li>
+        {% if session.get('user_id') %}
+        <li class="nav-item">
+          <!-- Chapter 2, Design Claim 1: the number of needed contributions is always visible -->
+          <a class="nav-link" href="{{ url_for('needs_reply') }}">
+            Needs a reply
+            {% if needs_reply_count %}<span class="badge rounded-pill bg-danger">{{ needs_reply_count }}</span>{% endif %}
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="{{ url_for('goals') }}">My Goal</a>
+        </li>
+        {% endif %}
         <li class="nav-item">
           <a class="nav-link" href="/about">About</a>
         </li>
