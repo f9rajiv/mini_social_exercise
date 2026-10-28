@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import re
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -272,8 +273,16 @@ def add_post():
         flash('You need to join this group before posting in it.', 'warning')
         return redirect(url_for('group_detail', group_id=group_id))
 
-    # Pass the user's content through the moderation function
+    # The raw text is stored; moderate_content() is applied when it is displayed
     moderated_content = content
+
+    # Chapter 4, Design Claim 20: remind the user of the rules before a
+    # post that breaks them goes live (they can edit or post anyway)
+    if moderated_content and moderated_content.strip():
+        reminder = posting_reminder(content, 'post', url_for('add_post'),
+                                    {'group_id': group_id or ''})
+        if reminder:
+            return reminder
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
@@ -561,6 +570,18 @@ def add_comment(post_id):
     # Get content from the submitted form
     content = request.form.get('content')
 
+    # Where to go afterwards; kept through the reminder page so we don't
+    # redirect back to this POST-only URL
+    back_url = local_back_url(url_for('post_detail', post_id=post_id))
+
+    # Chapter 4, Design Claim 20: reminder before a rule-breaking comment is saved
+    if content and content.strip():
+        reminder = posting_reminder(content, 'comment',
+                                    url_for('add_comment', post_id=post_id),
+                                    {'back': back_url})
+        if reminder:
+            return reminder
+
     # Basic validation to ensure comment is not empty
     if content and content.strip():
         db = get_db()
@@ -573,7 +594,7 @@ def add_comment(post_id):
         flash('Comment cannot be empty.', 'warning')
 
     # Redirect back to the page the user came from (likely the post detail page)
-    return redirect(request.referrer or url_for('post_detail', post_id=post_id))
+    return redirect(back_url)
 
 @app.route('/comments/<int:comment_id>/delete', methods=['POST'])
 def delete_comment(comment_id):
@@ -1274,6 +1295,63 @@ def leave_group(group_id):
     return redirect(url_for('group_detail', group_id=group_id))
 
 
+# =====================================================================
+# Coding Assignment #2: Posting reminder
+# Chapter 4, Design Claim 20: "Reminders of the rules at the point where
+# people might violate them lead to fewer violations."
+#
+# Before a post or comment is saved, it is checked with the moderation rules.
+# If it would be censored, removed or flagged, it is not saved right away.
+# Instead they see which rule it breaks and a preview of how others will see it,
+# and can edit the text or choose to post anyway.
+# =====================================================================
+
+def local_back_url(fallback):
+    """Returns the page the user came from, but only if it is on this site."""
+    back = request.form.get('back') or request.referrer or ''
+    parsed = urlparse(back)
+    if parsed.netloc and parsed.netloc != request.host:
+        return fallback
+    path = parsed.path or ''
+    if not path.startswith('/'):
+        return fallback
+    return path + ('?' + parsed.query if parsed.query else '')
+
+
+def posting_reminder(content, kind, form_action, hidden_fields):
+    """
+    Shows the reminder page if `content` breaks a rule and the user has not
+    already confirmed. Returns a rendered page, or None if posting can go ahead.
+
+    kind:          'post' or 'comment' (used in the wording)
+    form_action:   URL the edited text is sent back to
+    hidden_fields: extra form values to keep (group_id, back URL)
+    """
+    if request.form.get('confirmed') == '1':
+        return None
+
+    moderated, score, reasons = check_content(content)
+    if score == 0:
+        return None
+
+    # Rule 2.1: content from accounts under 7 days old counts 1.5x
+    user = query_db('SELECT created_at FROM users WHERE id = ?', (session['user_id'],), one=True)
+    is_new_account = (datetime.utcnow() - user['created_at']).days < 7
+    if is_new_account:
+        score *= 1.5
+
+    return render_template('post_reminder.html.j2',
+                           kind=kind,
+                           content=content,
+                           moderated=moderated,
+                           reasons=reasons,
+                           score=round(min(score, 5.0), 2),
+                           removed=moderated.startswith('[content removed'),
+                           is_new_account=is_new_account,
+                           form_action=form_action,
+                           hidden_fields=hidden_fields)
+
+
 # ----- Functions to be implemented are below
 # Coding Assignment #2
 
@@ -1291,12 +1369,94 @@ def user_risk_analysis(user_id):
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
 
-    return score;
+    # Rule 2.2 from the rules page:
+    # content_risk = profile*1 + average post score*3 + average comment score*1,
+    # then multiplied by an account-age factor and capped at 5.0.
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
 
-    
+    profile_score = moderate_content(user['profile'] or '')[1]
+
+    # Averages use the base content score (no per-post age multiplier); 0 if there is nothing.
+    post_rows = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    comment_rows = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    post_scores = [moderate_content(row['content'])[1] for row in post_rows]
+    comment_scores = [moderate_content(row['content'])[1] for row in comment_rows]
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0.0
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0.0
+
+    content_risk_score = profile_score * 1 + average_post_score * 3 + average_comment_score * 1
+
+    # Newer accounts are treated as riskier
+    age_days = (datetime.utcnow() - user['created_at']).days
+    if age_days < 7:
+        content_risk_score *= 1.5
+    elif age_days < 30:
+        content_risk_score *= 1.2
+
+    return min(content_risk_score, 5.0)
+
+
+# Regexes for the word lists are built once at start-up instead of on every call.
+# (?<!\w) and (?!\w) are "whole word" boundaries that also work when a phrase
+# starts or ends with a symbol (some tier 2 phrases do).
+def _whole_word_pattern(words):
+    alternatives = sorted((re.escape(w) for w in words), key=len, reverse=True)
+    return re.compile(r'(?<!\w)(?:' + '|'.join(alternatives) + r')(?!\w)', re.IGNORECASE)
+
+TIER1_PATTERN = _whole_word_pattern(TIER1_WORDS)
+TIER2_PATTERN = _whole_word_pattern(TIER2_PHRASES)
+TIER3_PATTERN = _whole_word_pattern(TIER3_WORDS)
+# A link is anything starting with http(s):// or www.
+LINK_PATTERN = re.compile(r'(?:https?://|www\.)\S+', re.IGNORECASE)
+
+
+def check_content(content):
+    """
+    Runs the moderation rules (Part 1 of the rules page) on a piece of text.
+
+    Returns (moderated_content, score, reasons). `reasons` is a list of short
+    human-readable explanations; the posting reminder (Chapter 4, Design Claim 20)
+    shows them to the user before they publish.
+    """
+    content = content or ''
+
+    # Stage 1.1: severe violations remove the whole text and stop processing.
+    if TIER1_PATTERN.search(content):
+        return ('[content removed due to severe violation]', 5.0,
+                ['It contains a severe word, so the whole text will be removed.'])
+    if TIER2_PATTERN.search(content):
+        return ('[content removed due to spam/scam policy]', 5.0,
+                ['It contains a spam or scam phrase, so the whole text will be removed.'])
+
+    # Stage 1.2: scored violations, starting from 0.0
+    score = 0.0
+    reasons = []
+
+    # Tier 3: mask each mild word with the same number of asterisks, +2.0 each
+    moderated, tier3_count = TIER3_PATTERN.subn(lambda m: '*' * len(m.group(0)), content)
+    if tier3_count:
+        score += 2.0 * tier3_count
+        reasons.append(f'{tier3_count} mild swear word(s) will be hidden with *****.')
+
+    # External links: replace each one, +2.0 each
+    moderated, link_count = LINK_PATTERN.subn('[link removed]', moderated)
+    if link_count:
+        score += 2.0 * link_count
+        reasons.append(f'{link_count} link(s) will be replaced with [link removed].')
+
+    # Excessive capitals: more than 15 letters and over 70% uppercase, +0.5 once.
+    # Counted on the original text; the text itself is not changed.
+    letters = [ch for ch in content if ch.isalpha()]
+    if len(letters) > 15 and sum(ch.isupper() for ch in letters) / len(letters) > 0.7:
+        score += 0.5
+        reasons.append('It is mostly in CAPITAL letters, which reads like shouting.')
+
+    return moderated, score, reasons
+
+
 # Assignment 2.1
 def moderate_content(content):
     """
@@ -1315,9 +1475,8 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
-    moderated_content = content
-    score = 0
-    
+    # The rules live in check_content(); here we only drop the list of reasons.
+    moderated_content, score, _ = check_content(content)
     return moderated_content, score
 
 # Coding Assignment #3

@@ -1,0 +1,52 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{#
+  Posting reminder - Chapter 4, Design Claim 20:
+  remind people of the rules at the moment they are about to break them.
+  Shown instead of saving the post/comment; the user can edit or post anyway.
+#}
+
+<div class="col-md-8 mx-auto">
+  <div class="card shadow-sm border-warning">
+    <div class="card-header bg-warning-subtle">
+      <strong>Before you post:</strong> your {{ kind }} breaks the
+      <a href="{{ url_for('rules') }}" target="_blank">community rules</a>.
+    </div>
+    <div class="card-body">
+
+      <!-- Which rules it breaks -->
+      <ul class="mb-3">
+        {% for reason in reasons %}
+          <li>{{ reason }}</li>
+        {% endfor %}
+        {% if is_new_account %}
+          <li>Your account is less than 7 days old, so this counts 1.5x toward your risk score.</li>
+        {% endif %}
+      </ul>
+      <p class="mb-3">
+        Risk score for this {{ kind }}: <span class="badge text-bg-{{ 'danger' if score >= 3 else 'warning' }}">{{ score }}</span>
+      </p>
+
+      <!-- What other people would actually see -->
+      <h6 class="text-muted">How others will see it:</h6>
+      <div class="border rounded p-2 mb-4 bg-body-tertiary {{ 'text-danger' if removed }}">{{ moderated }}</div>
+
+      <!-- Edit and re-check, or confirm -->
+      <form action="{{ form_action }}" method="POST">
+        {% for name, value in hidden_fields.items() %}
+          <input type="hidden" name="{{ name }}" value="{{ value }}">
+        {% endfor %}
+        <label for="reminder-content" class="form-label">Edit your {{ kind }}:</label>
+        <textarea id="reminder-content" class="form-control mb-3" name="content" rows="4" required>{{ content }}</textarea>
+        <div class="d-flex gap-2 justify-content-end">
+          <a href="{{ hidden_fields.back or url_for('feed') }}" class="btn btn-link">Cancel</a>
+          <button type="submit" class="btn btn-primary">Check again</button>
+          <button type="submit" name="confirmed" value="1" class="btn btn-outline-danger">
+            Post anyway{% if removed %} (it will be shown as removed){% endif %}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
