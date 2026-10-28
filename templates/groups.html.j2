@@ -5,7 +5,14 @@
 <div class="col-md-8 mx-auto">
   <h2 class="text-center border-bottom pb-2 mb-4"><span>Groups</span></h2>
 
-  {% if session.get('user_id') %}
+  {% if newcomer and newcomer.is_newcomer %}
+  <!-- Chapter 5, Design Claim 25: creating groups is locked for newcomers -->
+  <div class="alert alert-secondary">
+    <strong>Creating groups is locked</strong> while you are a new member.
+    {{ newcomer.contributions }} / {{ newcomer.needed }} posts or comments done.
+    You can already join any group below.
+  </div>
+  {% elif session.get('user_id') %}
   <!-- Create a new named group -->
   <div class="card shadow-sm mb-4">
     <div class="card-body">

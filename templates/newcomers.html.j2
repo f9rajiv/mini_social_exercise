@@ -1,0 +1,64 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+{#
+  New members page - Chapter 5, Design Claim 19:
+  introduction posts in one place, so old-timers can find and welcome newcomers.
+#}
+
+<div class="col-md-8 mx-auto">
+  <h2 class="text-center border-bottom pb-2 mb-3"><span>New members</span></h2>
+  <p class="text-center text-muted">Say hello to people who just joined. Introductions you have not welcomed yet are shown first.</p>
+
+  {% if newcomer and not newcomer.has_intro %}
+  <div class="alert alert-success text-center">
+    You haven't introduced yourself yet. <a href="{{ url_for('feed') }}">Write your introduction on the home page.</a>
+  </div>
+  {% endif %}
+
+  {% for intro in intros %}
+  <div class="card mb-3 shadow-sm {{ 'border-success' if not intro.welcomed_by_me }}">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <strong>{{ user_display(intro.username) }}</strong>
+        <div>
+          {% if intro.welcome_count == 0 %}
+            <span class="badge text-bg-danger">No welcomes yet</span>
+          {% else %}
+            <span class="badge text-bg-success">{{ intro.welcome_count }} welcome{{ 's' if intro.welcome_count != 1 }}</span>
+          {% endif %}
+          <small class="text-muted ms-2">joined {{ intro.joined_at|datetimeformat }}</small>
+        </div>
+      </div>
+      <p class="mt-2">{{ intro.content }}</p>
+
+      {% if session.get('user_id') and session.get('username') != intro.username %}
+        {% if intro.welcomed_by_me %}
+          <small class="text-success">You welcomed {{ intro.username }}.</small>
+        {% else %}
+        <!-- Welcome reply goes through the normal comment route (with moderation reminder) -->
+        <form action="{{ url_for('add_comment', post_id=intro.id) }}" method="POST" class="d-flex gap-2">
+          <input type="text" name="content" class="form-control form-control-sm" required
+                 value="Welcome to MiniSocial, @{{ intro.username }}! ">
+          <button type="submit" class="btn btn-success btn-sm">Say welcome</button>
+        </form>
+        {% endif %}
+      {% endif %}
+      <a href="{{ url_for('post_detail', post_id=intro.id) }}" class="small">Open introduction</a>
+    </div>
+  </div>
+  {% else %}
+  <p class="text-center text-muted">No introductions yet.</p>
+  {% endfor %}
+
+  {% if quiet_members %}
+  <!-- Public profiles of recent members who have not posted an introduction -->
+  <h5 class="border-bottom pb-2 mt-4">Also joined recently</h5>
+  <p>
+    {% for member in quiet_members %}
+      <span class="me-2">{{ user_display(member.username) }}</span>
+    {% endfor %}
+  </p>
+  {% endif %}
+</div>
+{% endblock %}

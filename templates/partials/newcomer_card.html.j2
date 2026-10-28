@@ -1,0 +1,45 @@
+{#
+  Newcomer card on the feed (Coding Assignment #3).
+  - Chapter 5, Design Claim 19: ask the newcomer to post an introduction.
+  - Chapter 5, Design Claim 25: show which features are still locked and how to unlock them.
+  Expects `newcomer` from newcomer_status().
+#}
+{% if newcomer and (newcomer.is_newcomer or (not newcomer.has_intro and newcomer.days_left > 0)) %}
+<div class="card shadow-sm border-success">
+  <div class="card-body">
+    <h5 class="card-title">Welcome to MiniSocial, {{ session.get('username') }}!</h5>
+
+    {% if not newcomer.has_intro %}
+    <!-- Introduction post: shown to everyone on the New members page -->
+    <p class="mb-2">Introduce yourself so other members can say hello. Your introduction is pinned on your profile.</p>
+    <form action="{{ url_for('add_post') }}" method="POST" class="mb-3">
+      <input type="hidden" name="is_intro" value="1">
+      <textarea class="form-control mb-2" name="content" rows="2" required
+                placeholder="Hi! I'm ... and I like ..."></textarea>
+      <button type="submit" class="btn btn-success btn-sm">Post my introduction</button>
+    </form>
+    {% else %}
+    <p class="mb-2">Thanks for introducing yourself!
+      <a href="{{ url_for('newcomers') }}">See who else is new</a>.</p>
+    {% endif %}
+
+    {% if newcomer.is_newcomer %}
+    <!-- Progressive access: what is locked and how close the user is to unlocking it -->
+    <h6 class="mt-2">New member access</h6>
+    <div class="progress mb-1" role="progressbar" aria-valuenow="{{ newcomer.percent }}" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-bar bg-success" style="width: {{ newcomer.percent }}%">{{ newcomer.contributions }} / {{ newcomer.needed }}</div>
+    </div>
+    <small class="text-muted d-block mb-2">
+      Make {{ newcomer.needed - newcomer.contributions }} more post{{ 's' if newcomer.needed - newcomer.contributions != 1 }} or comment{{ 's' if newcomer.needed - newcomer.contributions != 1 }}
+      that follow the <a href="{{ url_for('rules') }}">rules</a> to unlock full access
+      (or wait {{ newcomer.days_left }} day{{ 's' if newcomer.days_left != 1 }}).
+    </small>
+    <ul class="small mb-0">
+      <li>Posts today: {{ newcomer.posts_today }} / {{ newcomer.daily_limit }}
+        {% if newcomer.posts_left == 0 %}<span class="badge text-bg-warning">limit reached, you can still comment</span>{% endif %}</li>
+      <li>Creating groups: <span class="badge text-bg-secondary">locked</span> (you can already join groups)</li>
+    </ul>
+    {% endif %}
+  </div>
+</div>
+{% endif %}

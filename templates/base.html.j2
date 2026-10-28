@@ -53,6 +53,13 @@
           <a class="nav-link" href="{{ url_for('goals') }}">My Goal</a>
         </li>
         {% endif %}
+        <!-- Coding Assignment #3: Chapter 5, Design Claim 19 - introductions waiting for a welcome -->
+        <li class="nav-item">
+          <a class="nav-link" href="{{ url_for('newcomers') }}">
+            New members
+            {% if unwelcomed_count %}<span class="badge rounded-pill bg-success">{{ unwelcomed_count }}</span>{% endif %}
+          </a>
+        </li>
         <li class="nav-item">
           <a class="nav-link" href="/about">About</a>
         </li>

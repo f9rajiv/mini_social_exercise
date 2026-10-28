@@ -12,6 +12,11 @@
   {% include "partials/goal_widget.html.j2" %}
 </div>
 
+<!-- Newcomer card (Chapter 5, Design Claims 19 & 25); only shown to new accounts -->
+<div class="col-md-8 mx-auto mb-4">
+  {% include "partials/newcomer_card.html.j2" %}
+</div>
+
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
@@ -84,6 +89,10 @@
       {% if entry.post.group_name %}
       <!-- Post was made inside an interest group (Chapter 3, Design Claim 6) -->
       <a href="{{ url_for('group_detail', group_id=entry.post.group_id) }}" class="badge text-bg-info text-decoration-none mt-2">in {{ entry.post.group_name }}</a>
+      {% endif %}
+      {% if entry.post.is_intro %}
+      <!-- Introduction post (Chapter 5, Design Claim 19) -->
+      <a href="{{ url_for('newcomers') }}" class="badge text-bg-success text-decoration-none mt-2">New member introduction</a>
       {% endif %}
       <p class="mt-2">{{ entry.post.content }}</p>
 

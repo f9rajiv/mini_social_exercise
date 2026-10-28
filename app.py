@@ -5,6 +5,7 @@ import collections
 import json
 import sqlite3
 import hashlib
+import math
 import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -119,6 +120,21 @@ def init_assignment1_tables():
 
 init_assignment1_tables()
 
+
+def init_assignment3_tables():
+    """
+    Database change for Coding Assignment #3 (safe to run on every start).
+    Chapter 5, Design Claim 19: a post can be marked as the author's introduction.
+    """
+    db = sqlite3.connect(DATABASE)
+    post_columns = [row[1] for row in db.execute('PRAGMA table_info(posts)')]
+    if 'is_intro' not in post_columns:
+        db.execute('ALTER TABLE posts ADD COLUMN is_intro INTEGER NOT NULL DEFAULT 0')
+    db.commit()
+    db.close()
+
+init_assignment3_tables()
+
 @app.template_filter('datetimeformat')
 def datetimeformat(value):
     if isinstance(value, datetime):
@@ -166,7 +182,7 @@ def feed():
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
                    IFNULL(r.total_reactions, 0) as total_reactions,
-                   ig.id as group_id, ig.name as group_name
+                   ig.id as group_id, ig.name as group_name, p.is_intro
             FROM posts p
             JOIN users u ON p.user_id = u.id
             LEFT JOIN interest_groups ig ON p.group_id = ig.id
@@ -184,7 +200,7 @@ def feed():
     else:  # Default sort is 'new'
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
-                   ig.id as group_id, ig.name as group_name
+                   ig.id as group_id, ig.name as group_name, p.is_intro
             FROM posts p
             JOIN users u ON p.user_id = u.id
             LEFT JOIN interest_groups ig ON p.group_id = ig.id
@@ -241,6 +257,9 @@ def feed():
     goal_progress = get_goal_progress(current_user_id) if current_user_id else None
     suggested_goal = suggest_goal(current_user_id) if current_user_id and not goal_progress else None
 
+    #  Newcomer card (Chapter 5, Design Claims 19 & 25): intro prompt and access progress
+    newcomer = newcomer_status(current_user_id) if current_user_id else None
+
     #  4. Render Template with Pagination Info
     return render_template('feed.html.j2',
                            posts=posts_data,
@@ -251,7 +270,8 @@ def feed():
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES,
                            goal_progress=goal_progress,
-                           suggested_goal=suggested_goal)
+                           suggested_goal=suggested_goal,
+                           newcomer=newcomer)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -273,6 +293,16 @@ def add_post():
         flash('You need to join this group before posting in it.', 'warning')
         return redirect(url_for('group_detail', group_id=group_id))
 
+    # Chapter 5, Design Claim 19: the post is the user's introduction (only one allowed)
+    is_intro = 1 if request.form.get('is_intro') == '1' and not get_intro_post(user_id) else 0
+
+    # Chapter 5, Design Claim 25: newcomers can only post a few times per day
+    status = newcomer_status(user_id)
+    if status['is_newcomer'] and status['posts_today'] >= NEWCOMER_DAILY_POSTS:
+        flash(f'New members can make {NEWCOMER_DAILY_POSTS} posts per day. '
+              f'Comment on other posts to unlock full access sooner!', 'warning')
+        return redirect(url_for('group_detail', group_id=group_id) if group_id else url_for('feed'))
+
     # The raw text is stored; moderate_content() is applied when it is displayed
     moderated_content = content
 
@@ -280,17 +310,20 @@ def add_post():
     # post that breaks them goes live (they can edit or post anyway)
     if moderated_content and moderated_content.strip():
         reminder = posting_reminder(content, 'post', url_for('add_post'),
-                                    {'group_id': group_id or ''})
+                                    {'group_id': group_id or '', 'is_intro': is_intro})
         if reminder:
             return reminder
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
         db = get_db()
-        db.execute('INSERT INTO posts (user_id, content, group_id) VALUES (?, ?, ?)',
-                   (user_id, moderated_content, group_id))
+        db.execute('INSERT INTO posts (user_id, content, group_id, is_intro) VALUES (?, ?, ?, ?)',
+                   (user_id, moderated_content, group_id, is_intro))
         db.commit()
-        flash('Your post was successfully created!', 'success')
+        if is_intro:
+            flash('Thanks for introducing yourself! Other members can now welcome you.', 'success')
+        else:
+            flash('Your post was successfully created!', 'success')
         flash_goal_feedback(user_id)
     else:
         # This will catch empty posts or posts that were fully censored
@@ -391,6 +424,12 @@ def user_profile(username):
         WHERE gm.user_id = ? ORDER BY ig.name
     ''', (user['id'],))
 
+    # Chapter 5, Design Claim 19: the user's introduction is pinned on their profile
+    intro_post = get_intro_post(user['id'])
+    if intro_post:
+        intro_post = dict(intro_post)
+        intro_post['content'], _ = moderate_content(intro_post['content'])
+
     return render_template('user_profile.html.j2',
                            user=user,
                            posts=posts,
@@ -398,7 +437,8 @@ def user_profile(username):
                            followers_count=followers_count,
                            following_count=following_count,
                            is_following=is_currently_following,
-                           user_groups=user_groups)
+                           user_groups=user_groups,
+                           intro_post=intro_post)
     
 
 @app.route('/u/<username>/followers')
@@ -1203,7 +1243,9 @@ def groups_index():
         FROM interest_groups ig
         ORDER BY is_member DESC, member_count DESC, ig.name
     ''', (user_id or 0,))
-    return render_template('groups.html.j2', groups=groups)
+    # Chapter 5, Design Claim 25: newcomers see that creating groups is still locked
+    newcomer = newcomer_status(user_id) if user_id else None
+    return render_template('groups.html.j2', groups=groups, newcomer=newcomer)
 
 
 @app.route('/groups/new', methods=['POST'])
@@ -1213,6 +1255,12 @@ def create_group():
     if not user_id:
         flash('You must be logged in to create a group.', 'danger')
         return redirect(url_for('login'))
+
+    # Chapter 5, Design Claim 25: creating groups is unlocked after the newcomer period
+    if newcomer_status(user_id)['is_newcomer']:
+        flash('New members can join groups, but creating one unlocks after '
+              f'{NEWCOMER_UNLOCK_CONTRIBUTIONS} posts or comments.', 'warning')
+        return redirect(url_for('groups_index'))
 
     name = (request.form.get('name') or '').strip()
     description = (request.form.get('description') or '').strip()
@@ -1350,6 +1398,159 @@ def posting_reminder(content, kind, form_action, hidden_fields):
                            is_new_account=is_new_account,
                            form_action=form_action,
                            hidden_fields=hidden_fields)
+
+
+# =====================================================================
+# Coding Assignment #3: Dealing with newcomers
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# Feature 1 - Chapter 5, Design Claim 19:
+# "Public profiles and introduction threads increase interaction
+#  between old-timers and newcomers."
+# Newcomers are asked to write an introduction post. All introductions
+# are collected on the /newcomers page where members can welcome them,
+# and the intro is pinned on the newcomer's profile.
+# ---------------------------------------------------------------------
+
+def get_intro_post(user_id):
+    """Returns the user's introduction post, or None if they have not written one."""
+    return query_db('SELECT id, content, created_at FROM posts WHERE user_id = ? AND is_intro = 1 '
+                    'ORDER BY id LIMIT 1', (user_id,), one=True)
+
+
+# Introductions from the last 30 days that the viewer has not commented on yet
+UNWELCOMED_INTROS_WHERE = """
+    p.is_intro = 1
+    AND p.user_id != :uid
+    AND p.created_at >= datetime('now', '-30 days')
+    AND NOT EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id = :uid)
+"""
+
+
+@app.context_processor
+def inject_unwelcomed_count():
+    """Number shown next to 'New members' in the navbar."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return {'unwelcomed_count': 0}
+    row = query_db(f'SELECT COUNT(*) AS n FROM posts p WHERE {UNWELCOMED_INTROS_WHERE}',
+                   {'uid': user_id}, one=True)
+    return {'unwelcomed_count': row['n']}
+
+
+@app.route('/newcomers')
+def newcomers():
+    """Lists introduction posts so members can welcome newcomers."""
+    user_id = session.get('user_id') or 0
+
+    # Intros the viewer has not welcomed yet come first, then newest first
+    intros = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.created_at AS joined_at,
+               (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id AND c.user_id != p.user_id) AS welcome_count,
+               EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id = :uid) AS welcomed_by_me
+        FROM posts p JOIN users u ON u.id = p.user_id
+        WHERE p.is_intro = 1
+        ORDER BY welcomed_by_me ASC, p.created_at DESC
+        LIMIT 50
+    ''', {'uid': user_id})
+    intros = [dict(row) for row in intros]
+    for intro in intros:
+        intro['content'], _ = moderate_content(intro['content'])
+
+    # Recently joined members who have not introduced themselves yet (public profiles)
+    quiet_members = query_db('''
+        SELECT u.username, u.created_at FROM users u
+        WHERE u.created_at >= datetime('now', '-30 days')
+          AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.user_id = u.id AND p.is_intro = 1)
+        ORDER BY u.created_at DESC LIMIT 20
+    ''')
+
+    newcomer = newcomer_status(user_id) if user_id else None
+    return render_template('newcomers.html.j2', intros=intros,
+                           quiet_members=quiet_members, newcomer=newcomer)
+
+
+# ---------------------------------------------------------------------
+# Feature 2 - Chapter 5, Design Claim 25:
+# "Progressive access controls reduce the harm newcomers can do."
+# A new account starts with limited rights: at most 3 posts per day and
+# no creating groups. Full access unlocks after 5 posts/comments that pass
+# moderation, or automatically after 7 days. The user sees their progress.
+# ---------------------------------------------------------------------
+NEWCOMER_DAYS = 7
+NEWCOMER_UNLOCK_CONTRIBUTIONS = 5
+NEWCOMER_DAILY_POSTS = 3
+
+
+def count_clean_contributions(user_id):
+    """
+    Posts + comments that pass moderation (score below 1.0).
+    Censored or removed content does not count, so spamming bad posts
+    does not unlock access faster.
+    """
+    rows = query_db('SELECT content FROM posts WHERE user_id = ? '
+                    'UNION ALL SELECT content FROM comments WHERE user_id = ?', (user_id, user_id))
+    return sum(1 for row in rows if moderate_content(row['content'])[1] < 1.0)
+
+
+def newcomer_status(user_id):
+    """Returns a dict describing the user's newcomer level and what is still locked."""
+    user = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return {'is_newcomer': False, 'posts_today': 0, 'has_intro': True}
+
+    age_days = (datetime.utcnow() - user['created_at']).days
+    contributions = count_clean_contributions(user_id)
+    is_newcomer = age_days < NEWCOMER_DAYS and contributions < NEWCOMER_UNLOCK_CONTRIBUTIONS
+
+    today_start = datetime.utcnow().strftime('%Y-%m-%d 00:00:00')
+    posts_today = query_db('SELECT COUNT(*) AS n FROM posts WHERE user_id = ? AND created_at >= ?',
+                           (user_id, today_start), one=True)['n']
+
+    return {
+        'is_newcomer': is_newcomer,
+        'contributions': min(contributions, NEWCOMER_UNLOCK_CONTRIBUTIONS),
+        'needed': NEWCOMER_UNLOCK_CONTRIBUTIONS,
+        'percent': int(100 * min(contributions, NEWCOMER_UNLOCK_CONTRIBUTIONS) / NEWCOMER_UNLOCK_CONTRIBUTIONS),
+        'days_left': max(0, NEWCOMER_DAYS - age_days),
+        'posts_today': posts_today,
+        'posts_left': max(0, NEWCOMER_DAILY_POSTS - posts_today),
+        'daily_limit': NEWCOMER_DAILY_POSTS,
+        'has_intro': get_intro_post(user_id) is not None,
+    }
+
+
+# ---------------------------------------------------------------------
+# Helpers for the recommendation algorithm (Assignment 3.1)
+# ---------------------------------------------------------------------
+POSITIVE_REACTIONS = ('like', 'love', 'haha', 'wow')
+
+STOP_WORDS = set('''
+a an the and or but if so of to in on at for with from by about as into is are was were be been
+being am i me my we our you your he she it its they them their this that these those there here
+just really very so too not no yes do does did done have has had will would can could should
+what when where who how all any some more most much many one two get got make made out up down
+over again then than now new day today time like love feel feeling great good best amazing
+finally ever even still also only s t ve ll re m d'''.split())
+
+
+def tokenize(text):
+    """
+    Splits text into lowercase keywords and drops common words.
+    Hashtags are split on capitals: #DIYLife -> diy, life
+    """
+    tokens = []
+    for word in re.findall(r'#?\w+', text or ''):
+        if word.startswith('#'):
+            parts = re.findall(r'[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+', word[1:])
+        else:
+            parts = [word]
+        for part in parts:
+            part = part.lower()
+            if len(part) > 2 and part not in STOP_WORDS and not part.isdigit():
+                tokens.append(part)
+    return tokens
 
 
 # ----- Functions to be implemented are below
@@ -1501,9 +1702,76 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    # Hybrid recommender:
+    #  1. Content-based: build a keyword profile (TF-IDF) from the posts the user
+    #     reacted to positively, and score other posts by cosine similarity to it.
+    #  2. Social: small bonus for authors the user liked before or follows.
+    #  3. Cold start: if there is no signal yet, fall back to the most reacted posts.
+    all_posts = query_db('''
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+               ig.id AS group_id, ig.name AS group_name, p.is_intro,
+               IFNULL(r.total_reactions, 0) AS total_reactions
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN interest_groups ig ON p.group_id = ig.id
+        LEFT JOIN (SELECT post_id, COUNT(*) AS total_reactions FROM reactions GROUP BY post_id) r
+               ON r.post_id = p.id
+    ''')
+    posts_by_id = {post['id']: dict(post) for post in all_posts}
 
-    return recommended_posts;
+    # IDF: words that appear in many posts ("today", "fun") get a low weight,
+    # rare topic words ("diy", "terrarium") get a high weight.
+    post_tokens = {pid: collections.Counter(tokenize(post['content'])) for pid, post in posts_by_id.items()}
+    doc_freq = collections.Counter()
+    for tokens in post_tokens.values():
+        doc_freq.update(tokens.keys())
+    total_docs = len(posts_by_id) or 1
+    idf = {term: math.log(total_docs / (1 + df)) + 1 for term, df in doc_freq.items()}
+
+    def tfidf_vector(tokens):
+        vec = {term: count * idf.get(term, 1.0) for term, count in tokens.items()}
+        norm = math.sqrt(sum(v * v for v in vec.values())) or 1.0
+        return {term: v / norm for term, v in vec.items()}
+
+    liked_ids, reacted_ids, followed = set(), set(), set()
+    if user_id:
+        for row in query_db('SELECT post_id, reaction_type FROM reactions WHERE user_id = ?', (user_id,)):
+            reacted_ids.add(row['post_id'])
+            if row['reaction_type'] in POSITIVE_REACTIONS:
+                liked_ids.add(row['post_id'])
+        followed = {row['followed_id'] for row in
+                    query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))}
+
+    # The user's interest profile = sum of the TF-IDF vectors of liked posts
+    profile = collections.Counter()
+    liked_authors = collections.Counter()
+    for pid in liked_ids:
+        if pid in posts_by_id:
+            profile.update(tfidf_vector(post_tokens[pid]))
+            liked_authors[posts_by_id[pid]['user_id']] += 1
+    profile_norm = math.sqrt(sum(v * v for v in profile.values())) or 1.0
+
+    # Candidates: not the user's own posts and not posts they already reacted to
+    candidates = [post for pid, post in posts_by_id.items()
+                  if post['user_id'] != user_id and pid not in reacted_ids
+                  and (not filter_following or post['user_id'] in followed)]
+
+    max_reactions = max((post['total_reactions'] for post in candidates), default=0) or 1
+    for post in candidates:
+        if profile:
+            vec = tfidf_vector(post_tokens[post['id']])
+            content_score = sum(weight * profile.get(term, 0) for term, weight in vec.items()) / profile_norm
+        else:
+            content_score = 0.0
+        author_score = 0.2 * min(liked_authors[post['user_id']], 3) / 3 + (0.1 if post['user_id'] in followed else 0)
+        popularity_score = 0.05 * post['total_reactions'] / max_reactions
+        post['score'] = content_score + author_score + popularity_score
+
+    # Pick the 5 best, then show them newest first as the docstring asks
+    top = sorted(candidates, key=lambda post: post['score'], reverse=True)[:5]
+    recommended_posts = sorted(top, key=lambda post: post['created_at'], reverse=True)
+
+    return recommended_posts
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

@@ -17,6 +17,16 @@
           </p>
           <p class="card-text">{{ user.profile or "No profile information provided." }}</p>
 
+          <!-- Pinned introduction (Chapter 5, Design Claim 19) -->
+          {% if intro_post %}
+          <div class="alert alert-success py-2">
+            <strong>Introduction:</strong> {{ intro_post.content }}
+            <a href="{{ url_for('post_detail', post_id=intro_post.id) }}" class="small ms-1">Say hello</a>
+          </div>
+          {% elif session.user_id == user.id %}
+          <p class="small"><a href="{{ url_for('feed') }}">Introduce yourself</a> so other members can welcome you.</p>
+          {% endif %}
+
          {% if session.user_id and session.user_id != user.id %}
             <div class="my-3">
               {# The logic is now a simple boolean check #}
